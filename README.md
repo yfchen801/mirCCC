@@ -105,27 +105,6 @@ mirCCC provides 7 built-in visualization functions via `mirCCC_viz.py`:
 
 All functions accept `edge_df` (pipeline output) and `adata` as primary inputs. Pass `save_path='file.pdf'` to save figures.
 
-## Repository Structure
-
-```
-mirCCC/
-├── mirCCC_integrated_pipeline_api.py   # Core pipeline (proxy, scoring, graph, training)
-├── mirCCC_viz.py                       # Visualization module (7 plot functions)
-├── mirage_adapter.py                   # Pipeline adapter
-├── data/
-│   ├── mir2tar.csv                     # miRNA–target interactions (miRTarBase)
-│   ├── biogenesis.csv                  # EV biogenesis gene list
-│   ├── risc.csv                        # RISC pathway gene list
-│   ├── sorting.csv                     # miRNA sorting gene list
-│   └── geneinfo.csv                    # Gene alias mapping
-├── configs/                            # Configuration files
-├── notebooks/
-│   └── tutorial_quickstart.ipynb       # Tutorial
-├── requirements.txt
-├── LICENSE
-└── README.md
-```
-
 ## Key Parameters
 
 | Parameter | Default | Description |
