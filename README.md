@@ -7,7 +7,7 @@ mirCCC infers extracellular vesicle (EV)-derived miRNA-mediated cell–cell comm
 ## Installation
 
 ```bash
-git clone https://github.com/xxx/mirCCC.git
+git clone https://github.com/yfchen801/mirCCC.git
 cd mirCCC
 pip install -r requirements.txt
 ```
