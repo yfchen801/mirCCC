@@ -408,7 +408,213 @@ def plot_sankey(edge_df, adata, title='miRNA-mediated Cell Communication Flow\n(
 # ══════════════════════════════════════════════════════════════
 # 5. CIRCOS — miRNA ↔ TARGET GENE
 # ══════════════════════════════════════════════════════════════
+def plot_circos_convergent(edge_df, adata, mir2tar_df,
+                           sender_types=None, receiver_types=None,
+                           top_n_mirna=12, top_n_target_per_mirna=5,
+                           title=None, save_path=None, figsize=(14, 14)):
+    """Circos plot where the same miRNA from different senders gets separate arcs."""
+    import matplotlib.path as MPath
+    import matplotlib.patches as mpatches
+    import matplotlib.colors as mcolors
 
+    mask = pd.Series(True, index=edge_df.index)
+    if sender_types is not None:
+        mask &= edge_df['sender_type'].isin(sender_types)
+    if receiver_types is not None:
+        mask &= edge_df['receiver_type'].isin(receiver_types)
+    focal_edges = edge_df[mask]
+    if len(focal_edges) == 0:
+        print("No edges match."); return
+
+    col_mi = next((c for c in ['miRNA', 'mirna', 'miR'] if c in mir2tar_df.columns), None)
+    col_tg = next((c for c in ['target_gene', 'target', 'gene'] if c in mir2tar_df.columns), None)
+
+    # --- 关键改动：不去重，按 (mirna, sender_type) 分组 ---
+    mir_agg = focal_edges.groupby(['mirna', 'sender_type'])['score'].sum().reset_index()
+    
+    # 先选 top N 个 unique miRNA（按总分排）
+    mir_total = mir_agg.groupby('mirna')['score'].sum().nlargest(top_n_mirna)
+    top_mir_set = set(mir_total.index)
+    mir_agg = mir_agg[mir_agg['mirna'].isin(top_mir_set)]
+    
+    # 每行是一个 (mirna, sender_type) 组合
+    mir_agg = mir_agg.sort_values('score', ascending=False)
+    mir_agg['mir_label'] = mir_agg.apply(
+        lambda r: f"{r['mirna']} ({r['sender_type'][:1]})", axis=1)  # e.g. "mir-204 (S)"
+
+    var_upper = set(adata.var_names.str.upper())
+    
+    # Build links: each (mirna, sender) → targets
+    mir_target_links = []
+    for _, row in mir_agg.iterrows():
+        mirna = row['mirna']
+        sender_ct = row['sender_type']
+        mir_label = row['mir_label']
+        score = row['score']
+        
+        pat = _norm_mir(mirna)
+        m_mask = mir2tar_df[col_mi].apply(lambda x: _norm_mir(str(x)) == pat)
+        tgts = mir2tar_df.loc[m_mask, col_tg].unique()
+        tgts_in = [g for g in tgts if str(g).upper() in var_upper][:top_n_target_per_mirna]
+        
+        recv_ct = receiver_types[0] if receiver_types else 'Epi'
+        for g in tgts_in:
+            mir_target_links.append({
+                'mirna': mirna, 'mir_label': mir_label,
+                'target': g, 'tgt_label': f"{g} ({recv_ct})",
+                'score': score / max(len(tgts_in), 1),
+                'sender_type': sender_ct, 'receiver_type': recv_ct,
+            })
+
+    if len(mir_target_links) == 0:
+        print("No links found."); return
+
+    link_df = pd.DataFrame(mir_target_links)
+    mirnas_used = link_df.groupby('mir_label')['score'].sum().sort_values(ascending=False).index.tolist()
+    targets_used = link_df.groupby('tgt_label')['score'].sum().sort_values(ascending=False).index.tolist()
+    mir_totals = link_df.groupby('mir_label')['score'].sum()
+    tgt_totals = link_df.groupby('tgt_label')['score'].sum()
+    n_mir, n_tgt = len(mirnas_used), len(targets_used)
+
+    # --- Sender-based color: Strom=brown, Myeloid=teal ---
+    SENDER_COLORS = {
+        'Strom': '#8B4513',    # brown
+        'Myeloid': '#2E8B57',  # sea green
+    }
+    # fallback for other sender types
+    all_senders = sorted(link_df['sender_type'].unique())
+    for s in all_senders:
+        if s not in SENDER_COLORS:
+            SENDER_COLORS[s] = mcolors.to_hex(sns.color_palette("Set2", 8)[len(SENDER_COLORS) % 8])
+    
+    recv_palette = {'Epi': '#E74C3C'}
+    all_receivers = sorted(link_df['receiver_type'].unique())
+    for r in all_receivers:
+        if r not in recv_palette:
+            recv_palette[r] = mcolors.to_hex(sns.color_palette("Set1", 8)[len(recv_palette) % 8])
+
+    label_to_sender = dict(zip(link_df['mir_label'], link_df['sender_type']))
+    label_to_receiver = dict(zip(link_df['tgt_label'], link_df['receiver_type']))
+    mir_colors = {ml: SENDER_COLORS[label_to_sender[ml]] for ml in mirnas_used}
+    tgt_colors = {tl: recv_palette[label_to_receiver[tl]] for tl in targets_used}
+
+    # --- Arc layout (same as original) ---
+    GAP, GAP_MINOR, MIN_ARC = 8, 1.0, 2.0
+    mir_zone_start, mir_zone_end = -90 + GAP, 90 - GAP
+    tgt_zone_start, tgt_zone_end = 90 + GAP, 270 - GAP
+
+    mir_avail = (mir_zone_end - mir_zone_start) - GAP_MINOR * max(n_mir - 1, 0)
+    mir_grand = mir_totals.sum()
+    mir_arcs = {}
+    cursor = mir_zone_start
+    for m in mirnas_used:
+        span = max((mir_totals[m] / mir_grand) * mir_avail, MIN_ARC)
+        mir_arcs[m] = (cursor, cursor + span)
+        cursor += span + GAP_MINOR
+
+    tgt_avail = (tgt_zone_end - tgt_zone_start) - GAP_MINOR * max(n_tgt - 1, 0)
+    tgt_grand = tgt_totals.sum()
+    tgt_arcs = {}
+    cursor = tgt_zone_start
+    for g in targets_used:
+        span = max((tgt_totals[g] / tgt_grand) * tgt_avail, MIN_ARC)
+        tgt_arcs[g] = (cursor, cursor + span)
+        cursor += span + GAP_MINOR
+
+    R_outer, R_inner, R_link, R_label = 1.0, 0.88, 0.86, 1.04
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    def draw_arc(a0, a1, r_out, r_in, color, alpha=0.9):
+        n_pts = max(int(abs(a1 - a0) * 2), 10)
+        theta = np.linspace(np.radians(a0), np.radians(a1), n_pts)
+        xo, yo = r_out * np.cos(theta), r_out * np.sin(theta)
+        xi, yi = r_in * np.cos(theta[::-1]), r_in * np.sin(theta[::-1])
+        verts = list(zip(xo, yo)) + list(zip(xi, yi))
+        verts.append(verts[0])
+        codes = [MPath.MOVETO] + [MPath.LINETO] * (len(verts) - 2) + [MPath.CLOSEPOLY]
+        ax.add_patch(mpatches.PathPatch(MPath(verts, codes), facecolor=color,
+                                        edgecolor='white', linewidth=0.5, alpha=alpha, zorder=3))
+
+    def radial_label(angle_deg, radius, text, fontsize=7, color='black', fontweight='normal'):
+        a = np.radians(angle_deg)
+        x, y = radius * np.cos(a), radius * np.sin(a)
+        rot = angle_deg
+        if 90 < angle_deg % 360 < 270:
+            rot += 180; ha = 'right'
+        else:
+            ha = 'left'
+        ax.text(x, y, text, ha=ha, va='center', fontsize=fontsize, fontweight=fontweight,
+                color=color, rotation=rot, rotation_mode='anchor')
+
+    # Draw arcs
+    for m in mirnas_used:
+        a0, a1 = mir_arcs[m]
+        draw_arc(a0, a1, R_outer, R_inner, mir_colors[m])
+        radial_label((a0 + a1) / 2, R_label, m, fontsize=8, fontweight='bold', color=mir_colors[m])
+
+    for g in targets_used:
+        a0, a1 = tgt_arcs[g]
+        draw_arc(a0, a1, R_outer, R_inner, tgt_colors[g], alpha=0.75)
+        radial_label((a0 + a1) / 2, R_label, g, fontsize=6.5, color=tgt_colors[g])
+
+    # Draw links
+    mir_cursor = {m: mir_arcs[m][0] for m in mirnas_used}
+    tgt_cursor = {g: tgt_arcs[g][0] for g in targets_used}
+    max_sc = link_df['score'].max()
+
+    for _, row in link_df.sort_values('score', ascending=False).iterrows():
+        ml, tl, sc_val = row['mir_label'], row['tgt_label'], row['score']
+        m_span = mir_arcs[ml][1] - mir_arcs[ml][0]
+        m_sub = m_span * (sc_val / mir_totals[ml]) if mir_totals[ml] > 0 else 0
+        m_a0 = mir_cursor[ml]; m_a1 = m_a0 + m_sub; mir_cursor[ml] = m_a1
+        g_span = tgt_arcs[tl][1] - tgt_arcs[tl][0]
+        g_sub = g_span * (sc_val / tgt_totals[tl]) if tgt_totals[tl] > 0 else 0
+        g_a0 = tgt_cursor[tl]; g_a1 = g_a0 + g_sub; tgt_cursor[tl] = g_a1
+
+        color = mir_colors[ml]
+        alpha = np.clip(sc_val / max_sc * 0.5 + 0.15, 0.1, 0.6)
+        n_arc = 20
+        th_m = np.linspace(np.radians(m_a0), np.radians(m_a1), n_arc)
+        pts_m = [(R_link * np.cos(t), R_link * np.sin(t)) for t in th_m]
+        th_g = np.linspace(np.radians(g_a1), np.radians(g_a0), n_arc)
+        pts_g = [(R_link * np.cos(t), R_link * np.sin(t)) for t in th_g]
+
+        verts, codes = [], []
+        verts.append(pts_m[0]); codes.append(MPath.MOVETO)
+        for p in pts_m[1:]: verts.append(p); codes.append(MPath.LINETO)
+        verts.append((0, 0)); verts.append(pts_g[0]); codes.extend([MPath.CURVE3, MPath.CURVE3])
+        for p in pts_g[1:]: verts.append(p); codes.append(MPath.LINETO)
+        verts.append((0, 0)); verts.append(pts_m[0]); codes.extend([MPath.CURVE3, MPath.CURVE3])
+        ax.add_patch(mpatches.PathPatch(MPath(verts, codes), facecolor=color,
+                                        edgecolor='none', alpha=alpha, zorder=2))
+
+    # Legend
+    legend_handles = []
+    for ct in all_senders:
+        legend_handles.append(mpatches.Patch(color=SENDER_COLORS[ct], alpha=0.8,
+                                             label=f'{ct} (sender)'))
+    for ct in all_receivers:
+        legend_handles.append(mpatches.Patch(color=recv_palette[ct], alpha=0.7,
+                                             label=f'{ct} (receiver)'))
+    ax.legend(handles=legend_handles, loc='lower center', fontsize=10, framealpha=0.9,
+              ncol=min(len(legend_handles), 4), bbox_to_anchor=(0.5, -0.03))
+
+    lim = 1.65
+    ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
+    ax.set_aspect('equal'); ax.axis('off')
+
+    if title is None:
+        sender_str = ', '.join(sender_types) if sender_types else 'All'
+        receiver_str = ', '.join(receiver_types) if receiver_types else 'All'
+        title = f'miRNA–Target Circuit: {sender_str} → {receiver_str}'
+    ax.set_title(title, fontsize=13, fontweight='bold', pad=15)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path.replace('.png', '.pdf'), bbox_inches='tight')
+    plt.show()
+                               
 def plot_circos(edge_df, adata, mir2tar_df, sender_types=None, receiver_types=None,
                 top_n_mirna=12, top_n_target_per_mirna=5,
                 title=None, save_path=None, figsize=(14, 14)):
