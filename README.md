@@ -101,19 +101,6 @@ All functions accept `edge_df` (pipeline output) and `adata` as primary inputs. 
 | `LEARNING_RATE` | 0.001 | Adam learning rate |
 | `GAMMA_COV` | 2.5 | Coverage down-weighting exponent |
 
-## Citation
-
-```bibtex
-@article{chen2026mirCCC,
-  title={mirCCC: predicting miRNA-mediated cell--cell communication from
-         single-cell transcriptomics via graph-diffused proxies and
-         self-supervised graph transformers},
-  author={Chen, Yifan},
-  journal={Briefings in Bioinformatics},
-  year={2026}
-}
-```
-
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
