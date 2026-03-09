@@ -19,45 +19,27 @@ pip install -r requirements.txt
 - PyTorch Geometric ≥ 2.3
 - CUDA-compatible GPU recommended (CPU also supported)
 
-## Quick Start
+## Quick Start: Tutorial
 
-### Run pipeline
+See [`tutorial_pipeline.ipynb`](tutorial_pipeline.ipynb) for a complete walkthrough of mirCCC on real scRNA-seq data (Pelka et al. 2021, CRC atlas).
 
-```python
-import scanpy as sc
-from mirCCC_integrated_pipeline_api import Config, run_full_pipeline
+The tutorial covers:
+1. Data loading and preprocessing (GSE178341)
+2. Patient selection and quality control
+3. Running the mirCCC pipeline
+4. All 7 visualization functions:
+   - `plot_chord` — global communication network
+   - `plot_chord_focal` — cell-type-centric communication
+   - `plot_sankey` — communication flow diagram
+   - `plot_dotplot` — miRNA × axis communication matrix
+   - `plot_circos` — miRNA–target gene circuit
+   - `plot_mirna_ranking` — per-axis miRNA ranking
+   - `plot_target_heatmap` — target gene expression by cell type
 
-adata = sc.read_h5ad("your_data.h5ad")
+### Data
 
-config = Config()
-config.OUTPUT_DIR = "./results"
-config.DEVICE = "cuda:0"  # or "cpu"
-results = run_full_pipeline(config)
-```
-
-### Visualize results
-
-```python
-from mirCCC_viz import plot_chord, plot_sankey, plot_dotplot, plot_circos
-
-edge_df = results['edge_df']
-
-# Global communication network
-plot_chord(edge_df, adata, save_path='chord.pdf')
-
-# Sender → Receiver flow
-plot_sankey(edge_df, adata, save_path='sankey.pdf')
-
-# EV-miRNA communication dot plot
-plot_dotplot(edge_df, adata, proxy_matrix=results['proxy_matrix'], save_path='dotplot.pdf')
-
-# miRNA–target gene circos plot
-import pandas as pd
-mir2tar = pd.read_csv("data/mir2tar.csv")
-plot_circos(edge_df, adata, mir2tar,
-            sender_types=['Tumor'], receiver_types=['T/NK'],
-            save_path='circos.pdf')
-```
+- **scRNA-seq**: Download from [GEO GSE178341](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE178341) and place in `./data/`
+- **miRNA references**: Included in `./mirna/`
 
 ### Input
 
