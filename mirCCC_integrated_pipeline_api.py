@@ -61,11 +61,12 @@ warnings.filterwarnings('ignore')
 
 class Config:
     
-    MIR2TAR_PATH = "/home/YifanChen/mirCCC/mirCCC/mirna/mir2tar.csv"
-    BIOGENESIS_PATH = "/home/YifanChen/mirCCC/mirCCC/mirna/biogenesis.csv"
-    RISC_PATH = "/home/YifanChen/mirCCC/mirCCC/mirna/risc.csv"
-    SORTING_PATH = "/home/YifanChen/mirCCC/mirCCC/mirna/sorting.csv"
-    GENEINFO_PATH = "/home/YifanChen/mirCCC/mirCCC/mirna/geneinfo.csv"
+    _MIRNA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mirna")
+    MIR2TAR_PATH = os.path.join(_MIRNA_DIR, "mir2tar.csv")
+    BIOGENESIS_PATH = os.path.join(_MIRNA_DIR, "biogenesis.csv")
+    RISC_PATH = os.path.join(_MIRNA_DIR, "risc.csv")
+    SORTING_PATH = os.path.join(_MIRNA_DIR, "sorting.csv")
+    GENEINFO_PATH = os.path.join(_MIRNA_DIR, "geneinfo.csv")
     SPECIES = "Human"
     
     OUTPUT_DIR = "./mirage_output"
@@ -3228,11 +3229,6 @@ if __name__ == "__main__":
     
     
     config = Config()
-    
-    config.MIR2TAR_PATH = "/home/YifanChen/mirCCC/mirna/mir2tar.csv"
-    config.BIOGENESIS_PATH = "/home/YifanChen/mirCCC/mirna/biogenesis.csv"
-    config.RISC_PATH = "/home/YifanChen/mirCCC/mirna/risc.csv"
-    config.SORTING_PATH = "/home/YifanChen/mirCCC/mirna/sorting.csv"
     
     config.OUTPUT_DIR = "./mirage_synthetic_validation"
     
