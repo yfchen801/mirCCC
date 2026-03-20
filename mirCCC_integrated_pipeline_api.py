@@ -1,4 +1,3 @@
-
 import os
 import sys
 import time
@@ -69,7 +68,7 @@ class Config:
     GENEINFO_PATH = os.path.join(_MIRNA_DIR, "geneinfo.csv")
     SPECIES = "Human"
     
-    OUTPUT_DIR = "./mirage_output"
+    OUTPUT_DIR = "./mirccc_output"
     
     SYNTH_N_CELLS = 3000
     SYNTH_N_GENES = 4000
@@ -2265,7 +2264,7 @@ def export_communication_results(
     adata: ad.AnnData,
     payload: Dict,
     output_dir: str,
-    prefix: str = "mirage",
+    prefix: str = "mirccc",
     formats: List[str] = ["csv", "parquet"],
     agg_methods: List[str] = ["max", "sum", "topk_sum"],
 ) -> Dict[str, str]:
@@ -3087,7 +3086,7 @@ def run_full_pipeline(config: Config):
             adata=adata,
             payload=payload,
             output_dir=results_path,
-            prefix="mirage",
+            prefix="mirccc",
             formats=["csv"],
             agg_methods=["sum", "max", "topk_sum"]
         )
@@ -3230,7 +3229,7 @@ if __name__ == "__main__":
     
     config = Config()
     
-    config.OUTPUT_DIR = "./mirage_synthetic_validation"
+    config.OUTPUT_DIR = "./mirccc_synthetic_validation"
     
     config.SYNTH_N_CELLS = 3000
     config.SYNTH_N_GENES = 4000
