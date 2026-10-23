@@ -8,7 +8,8 @@ import gzip
 import warnings
 from pathlib import Path
 from datetime import datetime
-from argparse import Namespace
+from argparse import ArgumentParser, Namespace
+from copy import copy
 from typing import Dict, List, Tuple, Optional, Set
 from collections import defaultdict
 from pprint import pprint
@@ -34,6 +35,7 @@ import scanpy as sc
 import anndata as ad
 import h5py
 
+
 try:
     import torch
     import torch.nn as nn
@@ -45,6 +47,7 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
     print("[WARNING] PyTorch/PyG not available. Training steps will be skipped.")
+
 
 try:
     import umap
@@ -58,30 +61,43 @@ except Exception:
 warnings.filterwarnings('ignore')
 
 
+
+
+
 class Config:
     
-    _MIRNA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mirna")
-    MIR2TAR_PATH = os.path.join(_MIRNA_DIR, "mir2tar.csv")
-    BIOGENESIS_PATH = os.path.join(_MIRNA_DIR, "biogenesis.csv")
-    RISC_PATH = os.path.join(_MIRNA_DIR, "risc.csv")
-    SORTING_PATH = os.path.join(_MIRNA_DIR, "sorting.csv")
-    GENEINFO_PATH = os.path.join(_MIRNA_DIR, "geneinfo.csv")
-    SPECIES = "Human"
+    
+    
+    DATA_DIR = Path(__file__).resolve().parent / "mirna"
+    MIR2TAR_PATH = str(DATA_DIR / "mir2tar.csv")
+    BIOGENESIS_PATH = str(DATA_DIR / "biogenesis.csv")
+    RISC_PATH = str(DATA_DIR / "risc.csv")
+    SORTING_PATH = str(DATA_DIR / "sorting.csv")
+    
+    GENEINFO_PATH = str(DATA_DIR / "geneinfo.csv")
+    SPECIES = "Human"  
+    
     
     OUTPUT_DIR = "./mirccc_output"
     
-    SYNTH_N_CELLS = 3000
+    
+    SYNTH_N_CELLS = 3000          
     SYNTH_N_GENES = 4000
     SYNTH_N_CELL_TYPES = 8
-    SYNTH_SPARSITY = 0.45
-    SYNTH_NOISE_LEVEL = 0.15
-    SYNTH_BATCH_EFFECT = 0.0
+    SYNTH_SPARSITY = 0.45         
+    SYNTH_NOISE_LEVEL = 0.15      
+    SYNTH_BATCH_EFFECT = 0.0      
     SYNTH_RANDOM_SEED = 42
+    
     
     MIN_CELLS_EXPR = 5
     MIN_TARGETS_PER_MIRNA = 10
     COV_MIN = 0
     GAMMA_COV = 2.5
+    PROXY_KEEP_ONLY = False
+    PROXY_STD_MIN = 1e-6
+    MAX_MIRNA_CANDIDATES = None
+    
     
     TOP_K_MIRNA_PER_CELL = 0
     COEXPR_THRESHOLD = 0.005
@@ -89,6 +105,7 @@ class Config:
     TOP_S_SENDERS = 150
     TOP_R_RECEIVERS = 150
     TOP_L_PER_SENDER = 10
+    
     
     NUM_EPOCHS = 500
     PRINT_EVERY = 50
@@ -98,16 +115,86 @@ class Config:
     MIR_EMB_DIM = 16
     DEVICE = "cuda:0" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu"
     
+    
     NUM_PARTS = 50
     OVERLAP_HOPS = 1
     RETAIN_PERCENT = 1
+    
     
     SAVE_FIGURES = True
     FIGURE_DPI = 300
     FIGURE_FORMAT = 'png'
 
 
+    def __init__(
+        self,
+        data_dir=None,
+        output_dir=None,
+        *,
+        mir2tar_path=None,
+        biogenesis_path=None,
+        risc_path=None,
+        sorting_path=None,
+        geneinfo_path=None,
+    ):
+        
+        self.DATA_DIR = Path(
+            self.DATA_DIR if data_dir is None else data_dir
+        ).expanduser().resolve()
+        reference_paths = {
+            "MIR2TAR_PATH": (mir2tar_path, "mir2tar.csv"),
+            "BIOGENESIS_PATH": (biogenesis_path, "biogenesis.csv"),
+            "RISC_PATH": (risc_path, "risc.csv"),
+            "SORTING_PATH": (sorting_path, "sorting.csv"),
+            "GENEINFO_PATH": (geneinfo_path, "geneinfo.csv"),
+        }
+        for name, (override, filename) in reference_paths.items():
+            if override is not None:
+                path = override
+            elif data_dir is not None:
+                path = self.DATA_DIR / filename
+            else:
+                path = getattr(self, name)
+            if path is not None and path != "":
+                path = str(Path(path).expanduser().resolve())
+            setattr(self, name, path)
+        if output_dir is not None:
+            self.OUTPUT_DIR = str(Path(output_dir).expanduser().resolve())
+
+
+def validate_reference_paths(config: Config):
+    
+    required_names = (
+        "MIR2TAR_PATH", "BIOGENESIS_PATH", "RISC_PATH", "SORTING_PATH"
+    )
+    missing_paths = {
+        name: getattr(config, name, None)
+        for name in required_names
+        if not getattr(config, name, None) or not os.path.isfile(getattr(config, name))
+    }
+    if missing_paths:
+        details = ", ".join(f"{name}={path!r}" for name, path in missing_paths.items())
+        archive_hint = ""
+        mir2tar_path = missing_paths.get("MIR2TAR_PATH")
+        if mir2tar_path:
+            archive_path = Path(mir2tar_path).with_suffix(".rar")
+            if archive_path.is_file():
+                archive_hint = (
+                    f" Found archive {str(archive_path)!r}; extract it first and "
+                    f"ensure the CSV is available at {str(mir2tar_path)!r}."
+                )
+        raise FileNotFoundError(
+            f"Missing required mirCCC reference files: {details}. "
+            "Place the CSV files in the mirna directory beside this script, "
+            "pass Config(data_dir=...), or set individual file paths. "
+            "From the command line, use --data-dir or --mir2tar-path, "
+            "--biogenesis-path, --risc-path, and --sorting-path."
+            + archive_hint
+        )
+
+
 def setup_output_dirs(config: Config):
+    
     dirs = [
         config.OUTPUT_DIR,
         f"{config.OUTPUT_DIR}/synthetic_data",
@@ -121,6 +208,7 @@ def setup_output_dirs(config: Config):
 
 
 class MiRNATargetDatabase:
+    
     
     def __init__(
         self, 
@@ -207,6 +295,7 @@ class MiRNATargetDatabase:
 
 class CommunicationPattern:
     
+    
     def __init__(self, mirna_db: MiRNATargetDatabase):
         self.mirna_db = mirna_db
         self.cell_types = [
@@ -288,18 +377,19 @@ class SyntheticDataGenerator:
         batch_effect_strength: float = 0.0,
         n_batches: int = 3,
         random_seed: int = 42,
+       
         biogenesis_path: str = None,
         risc_path: str = None,
         sorting_path: str = None,
         species: str = "Human",
-        mirna_coverage: float = 1.0,
-        sr_ratio: str = "5:5",
-        prior_boost: float = 3.0,
+        mirna_coverage: float = 1.0,      
+        sr_ratio: str = "5:5",            
+        prior_boost: float = 3.0,         
         
-        repression_strength: float = 0.2,
+        repression_strength: float = 0.2, 
         
-        protect_dropout_scale: float = 0.25,
-        transfer_prob_base: float = 0.85
+        protect_dropout_scale: float = 0.25,  
+        transfer_prob_base: float = 0.85  
     ):
         self.mirna_db = mirna_db
         self.n_cells = n_cells
@@ -383,11 +473,12 @@ class SyntheticDataGenerator:
         targets = []
         for m in used_mirnas:
             targets.extend(self.mirna_db.get_targets(m))
+
         targets = list(dict.fromkeys([t for t in targets if isinstance(t, str) and t != ""]))
 
-        bio = _read_gene_list(Config.BIOGENESIS_PATH)
-        risc = _read_gene_list(Config.RISC_PATH)
-        sortg = _read_gene_list(Config.SORTING_PATH)
+        bio = _read_gene_list(self.biogenesis_path)
+        risc = _read_gene_list(self.risc_path)
+        sortg = _read_gene_list(self.sorting_path)
         modules = list(dict.fromkeys([*bio, *risc, *sortg]))
 
         genes = list(dict.fromkeys([*modules, *targets]))
@@ -528,17 +619,19 @@ class SyntheticDataGenerator:
                 
                 pre_boost_val = 5.0 
                 target_cells = sender_idx_all + receiver_idx_all
+
                 expression[np.ix_(target_cells, ti)] = np.maximum(
                     expression[np.ix_(target_cells, ti)], 
                     np.random.poisson(pre_boost_val, size=(len(target_cells), len(ti)))
                 )
 
+
                 for recv in receiver_active:
-                    expression[recv, ti] *= self.repression_strength
+                    expression[recv, ti] *= self.repression_strength 
 
                 cis_repress_factor = 0.25 
                 for snd in sender_active:
-                    expression[snd, ti] *= cis_repress_factor
+                    expression[snd, ti] *= cis_repress_factor 
 
                 if m not in self.ground_truth['mirna_activity']:
                     self.ground_truth['mirna_activity'][m] = {
@@ -567,7 +660,7 @@ class SyntheticDataGenerator:
         fake_receivers = unused_indices[split_pt:]
 
         decoy_scale = 1.0 
-        
+
         if len(fake_senders) > 0:
             fake_boost = self.prior_boost * decoy_scale
             if biog_idx: 
@@ -597,7 +690,7 @@ class SyntheticDataGenerator:
 
         protect = np.array([g in self.signal_gene_set for g in self.genes], dtype=bool)
         if protect.any():
-            dropout_prob[:, protect] *= self.protect_dropout_scale
+            dropout_prob[:, protect] *= self.protect_dropout_scale  
         
         expression[np.random.random(expression.shape) < dropout_prob] = 0
         return expression
@@ -628,6 +721,7 @@ class SyntheticDataGenerator:
         return expression, batch_labels
     
     def generate(self) -> ad.AnnData:
+        
         print("=" * 60)
         print("Generating Synthetic Data")
         print("=" * 60)
@@ -679,7 +773,9 @@ class SyntheticDataGenerator:
         return self.ground_truth
     
     def generate_ground_truth_labels(self) -> pd.DataFrame:
+        
         labels = []
+        
         
         for p in self.ground_truth['communication_pairs']:
             sender_cells = [i for i, c in enumerate(self.cell_type_labels) if c == p['sender']]
@@ -721,7 +817,6 @@ class SyntheticDataGenerator:
         
         return pd.DataFrame(labels)
 
-
 import unicodedata as ud
 
 _SPECIES_ALIASES = {
@@ -731,6 +826,7 @@ _SPECIES_ALIASES = {
 }
 
 def canonical_species(s: str) -> str:
+    
     s0 = str(s).strip().lower()
     s1 = " ".join(s0.replace("_", " ").replace("-", " ").replace(":", " ").split())
     for key, aliases in _SPECIES_ALIASES.items():
@@ -740,6 +836,7 @@ def canonical_species(s: str) -> str:
 
 
 def symbol_case_by_species(sym: str, species: str) -> str:
+    
     if not sym:
         return ""
     s = str(sym).strip()
@@ -749,7 +846,7 @@ def symbol_case_by_species(sym: str, species: str) -> str:
     return (s[:1].upper() + "".join(ch.lower() for ch in s[1:]))
 
 
-_STOP = {"", "-", ".", "Ã¢â‚¬â€", "Ã¢â‚¬â€œ", "Ã¢Ë†â€™", "Ã¢â‚¬â€™", "Ã¢â‚¬â€¢", "NA", "N/A", "NULL", "None", "?", "*"}
+_STOP = {"", "-", ".", "â€”", "â€“", "âˆ’", "â€’", "â€•", "NA", "N/A", "NULL", "None", "?", "*"}
 
 _DASH_MAP = str.maketrans({
     "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
@@ -758,6 +855,7 @@ _DASH_MAP = str.maketrans({
 
 
 def _clean_token(raw: str, species: str) -> str:
+    
     if pd.isna(raw):
         return ""
     s = ud.normalize("NFKC", str(raw)).translate(_DASH_MAP)
@@ -766,16 +864,19 @@ def _clean_token(raw: str, species: str) -> str:
 
 
 def _synonym_valid(tok: str) -> bool:
+    
     if tok in _STOP:
         return False
     return sum(ch.isalnum() for ch in tok) >= 2
 
 
 def _root(s: str) -> str:
+    
     return re.sub(r"[-._]", "", s)
 
 
 def build_alias_map_from_geneinfo(geneinfo_csv: str, species: str):
+    
     sp_key = canonical_species(species)
     df = pd.read_csv(geneinfo_csv)
 
@@ -783,6 +884,7 @@ def build_alias_map_from_geneinfo(geneinfo_csv: str, species: str):
     if not need.issubset(df.columns):
         raise KeyError(f"geneinfo.csv must contain columns: {need}")
 
+    
     def _is_species(x):
         try:
             return canonical_species(x) == sp_key
@@ -790,10 +892,10 @@ def build_alias_map_from_geneinfo(geneinfo_csv: str, species: str):
             return False
     df = df[df["species"].apply(_is_species)].copy()
 
+    
     df["symbol_norm"] = df["symbol"].map(lambda x: _clean_token(x, sp_key))
     df["synonym_norm"] = df["synonyms"].map(lambda x: _clean_token(x, sp_key))
     df = df[df["synonym_norm"].apply(_synonym_valid)].copy()
-
     grouped = df.groupby("synonym_norm", sort=False)["symbol_norm"].agg(
         lambda s: sorted(set(s))
     ).reset_index()
@@ -832,6 +934,7 @@ def build_alias_map_from_geneinfo(geneinfo_csv: str, species: str):
 
 
 def unify_and_merge_matrix(W, gene_names, alias2sym: dict, species: str, agg: str = "sum"):
+    
     if agg not in ("sum", "max"):
         raise ValueError("agg must be 'sum' or 'max'")
     sp_key = canonical_species(species)
@@ -848,7 +951,7 @@ def unify_and_merge_matrix(W, gene_names, alias2sym: dict, species: str, agg: st
     if sp.issparse(W):
         W = W.tocoo(copy=False)
         out = sp.coo_matrix((W.data, (W.row, new_col[W.col])), shape=(n_cells, n_new))
-        W_new = out.tocsr()
+        W_new = out.tocsr()  
     else:
         if agg == "sum":
             W_new = np.zeros((n_cells, n_new), dtype=W.dtype)
@@ -871,6 +974,7 @@ def unify_and_merge_matrix(W, gene_names, alias2sym: dict, species: str, agg: st
 
 
 def unify_anndata_varnames(adata, geneinfo_csv: str, species: str, agg: str = "sum", save_path: str = None):
+    
     if adata is None or not hasattr(adata, "X"):
         raise ValueError("Invalid AnnData object")
     
@@ -904,7 +1008,9 @@ def unify_anndata_varnames(adata, geneinfo_csv: str, species: str, agg: str = "s
 
     return adata_new, {"alias_stats": stats, "unify_report": rep}
 
+
 def support_to_score(s):
+    
     if pd.isna(s): 
         return 0.0
     s = str(s).strip().lower()
@@ -932,6 +1038,7 @@ def compute_mirna_coverage_weight(
     min_detect_frac: float = 0.05,
     alpha: float = 1.0,
 ) -> np.ndarray:
+    
     mirna_list = list(map(str, mirna_list))
     gene_list = np.array(gene_list, dtype=str)
 
@@ -1013,6 +1120,7 @@ def compute_mirna_coverage_weight(
 
 
 def reweight_A_signed_with_support(A_signed, mir2tar_csv, mirna_list, gene_list, row_norm="l1", use_idf=True):
+    
     mir2idx = {m: i for i, m in enumerate(mirna_list)}
     gene2idx = {g: j for j, g in enumerate(gene_list)}
     M, G = len(mirna_list), len(gene_list)
@@ -1071,6 +1179,7 @@ def reweight_A_signed_with_support(A_signed, mir2tar_csv, mirna_list, gene_list,
 
 
 def compute_zscore_matrix(W, eps: float = 1e-12):
+    
     if sp.issparse(W):
         mu = np.asarray(W.mean(axis=0)).ravel()
         sq = np.asarray(W.power(2).mean(axis=0)).ravel()
@@ -1086,6 +1195,7 @@ def compute_zscore_matrix(W, eps: float = 1e-12):
 
 
 def build_signal_matrix(X, M: int, sparse: bool = False, dtype=None):
+    
     C, G = X.shape[0], X.shape[1]
     out_dtype = dtype or (X.dtype if hasattr(X, "dtype") else np.float32)
 
@@ -1103,6 +1213,7 @@ def build_signal_matrix(X, M: int, sparse: bool = False, dtype=None):
 
 
 def build_propagation_adjacency(A_signed: sp.csr_matrix, normalize: bool = True) -> sp.csr_matrix:
+    
     M, G = A_signed.shape
     zero_MM = sp.csr_matrix((M, M))
     zero_GG = sp.csr_matrix((G, G))
@@ -1124,6 +1235,7 @@ def build_propagation_adjacency(A_signed: sp.csr_matrix, normalize: bool = True)
 
 
 def propagate_signed_onestep(A_signed: sp.csr_matrix, S0: np.ndarray) -> np.ndarray:
+    
     deg_abs = np.array(np.abs(A_signed).sum(axis=1)).flatten()
     with np.errstate(divide='ignore'):
         deg_inv = 1.0 / deg_abs
@@ -1136,6 +1248,7 @@ def propagate_signed_onestep(A_signed: sp.csr_matrix, S0: np.ndarray) -> np.ndar
 
 
 def compute_mirna_proxy(adata, mir2tar_csv, config: Config):
+    
     print("\n" + "=" * 60)
     print("STEP 1: Computing miRNA Proxy")
     print("=" * 60)
@@ -1221,7 +1334,7 @@ def compute_mirna_proxy(adata, mir2tar_csv, config: Config):
     )
 
     if getattr(config, "PROXY_KEEP_ONLY", False):
-        PR = PR.loc[:, keep]
+        PR = PR.loc[:, keep]                 
         mirna_list = PR.columns.astype(str).tolist()
         q_cov = q_cov[keep]
         adata.uns["miRNA_proxy_qcov"] = q_cov
@@ -1238,8 +1351,8 @@ def compute_mirna_proxy(adata, mir2tar_csv, config: Config):
     
     return adata, PR
 
-
 def z01(x, eps=1e-12):
+    
     x = np.asarray(x, dtype=np.float32)
     mn = np.nanmin(x)
     mx = np.nanmax(x)
@@ -1249,6 +1362,7 @@ def z01(x, eps=1e-12):
 
 
 def mean_zscore_score(X_sub):
+    
     X_sub = np.asarray(X_sub, dtype=np.float32)
     mu = X_sub.mean(axis=0, keepdims=True)
     sigma = X_sub.std(axis=0, ddof=1, keepdims=True)
@@ -1258,6 +1372,7 @@ def mean_zscore_score(X_sub):
 
 
 def compute_sender_receiver_scores(adata, config: Config):
+    
     print("\n" + "=" * 60)
     print("STEP 2: Computing Sender/Receiver Scores")
     print("=" * 60)
@@ -1349,12 +1464,14 @@ def compute_sender_receiver_scores(adata, config: Config):
 
 
 def _norm_mir_name(s):
+    
     s = str(s).strip().lower().replace("hsa-", "")
     s = s.replace("*", "")
     return re.sub(r"-(3p|5p)$", "", s)
 
 
 def assign_confidence_weight(row):
+    
     W_HIGH = 1.0
     W_MED = 0.5
     W_LOW = 0.1
@@ -1386,6 +1503,7 @@ def assign_confidence_weight(row):
 
 
 def build_communication_graph(adata, mir2tar_csv, config: Config):
+    
     print("\n" + "=" * 60)
     print("STEP 3: Building Communication Graph")
     print("=" * 60)
@@ -1412,7 +1530,7 @@ def build_communication_graph(adata, mir2tar_csv, config: Config):
     
     m2t["mi_norm"] = m2t[mi_col].astype(str).map(_norm_mir_name)
     m2t[tg_col] = m2t[tg_col].astype(str)
-    
+
     m2t = m2t[m2t[tg_col].isin(adata.var_names)]
     m2t["target_idx"] = m2t[tg_col].map(adata.var_names.get_loc)
     
@@ -1449,17 +1567,8 @@ def build_communication_graph(adata, mir2tar_csv, config: Config):
         mir_candidates = mir_candidates[:max_m]
 
     print(f"  miRNA candidates: {len(mir_candidates)}")
-    
+
     X = adata.X.tocsr() if sp.issparse(adata.X) else csr_matrix(adata.X)
-    
-    X_dense = X.toarray() if sp.issparse(X) else np.asarray(X)
-    n_cells_total, n_genes_total = X_dense.shape
-    rank_norm = np.zeros((n_cells_total, n_genes_total), dtype=np.float32)
-    for ci in range(n_cells_total):
-        rank_norm[ci] = np.argsort(np.argsort(-X_dense[ci])).astype(np.float32) / max(1, n_genes_total - 1)
-    print(f"  Rank matrix computed: {rank_norm.shape}")
-    
-    
     gene_mean = np.asarray(X.mean(axis=0)).ravel().astype(np.float32)
     NBINS = 30
     bins = pd.qcut(gene_mean, q=NBINS, labels=False, duplicates="drop")
@@ -1509,7 +1618,6 @@ def build_communication_graph(adata, mir2tar_csv, config: Config):
         sw = float(tgt_w.sum())
         if sw <= 1e-6:
             continue
-        
         proxy_idx = mir_name_to_idx.get(m, None)
         if proxy_idx is not None:
             mir_proxy_expr = miRNA_proxy_mat[:, proxy_idx]
@@ -1534,9 +1642,7 @@ def build_communication_graph(adata, mir2tar_csv, config: Config):
         
         if sender_idx.size == 0:
             continue
-        
         tmod_t = np.asarray((X[:, tgt_idx] @ tgt_w) / sw).ravel().astype(np.float32)
-        
         ctrl_idx = sample_matched_controls(tgt_idx, k=len(tgt_idx))
         if len(ctrl_idx) > 0:
             tmod_c = np.asarray((X[:, ctrl_idx] @ tgt_w[:len(ctrl_idx)]) / sw).ravel().astype(np.float32)
@@ -1544,17 +1650,9 @@ def build_communication_graph(adata, mir2tar_csv, config: Config):
             tmod_c = np.zeros_like(tmod_t)
         
         tmod_adj = (tmod_t - tmod_c).astype(np.float32)
-        repress_orig = z01(-tmod_adj)
-        
-        rank_repress = np.asarray(
-            (rank_norm[:, tgt_idx] * tgt_w[np.newaxis, :]).sum(axis=1) / sw
-        ).ravel().astype(np.float32)
-        repress_rank = z01(rank_repress)
-        
-        repress_01 = np.sqrt(repress_orig * repress_rank).astype(np.float32)
-        
+        repress_01 = z01(-tmod_adj)
         absorb_all = repress_01 * risc_01
-        
+
         R = min(config.TOP_R_RECEIVERS, adata.n_obs)
         nonzero_absorb = np.sum(absorb_all > 0)
         if nonzero_absorb == 0:
@@ -1569,7 +1667,7 @@ def build_communication_graph(adata, mir2tar_csv, config: Config):
         recv_sorted = recv_idx[np.argsort(-absorb_all[recv_idx])]
         L = min(config.TOP_L_PER_SENDER, recv_sorted.size)
         recv_topL = recv_sorted[:L]
-        
+
         for a in sender_idx:
             ea = float(sender_score_use[a])
             if ea <= 0:
@@ -1639,6 +1737,7 @@ def build_communication_graph(adata, mir2tar_csv, config: Config):
 if TORCH_AVAILABLE:
     
     def set_seed(seed):
+        
         import random
         random.seed(seed)
         os.environ['PYTHONHASHSEED'] = str(seed)
@@ -1651,6 +1750,7 @@ if TORCH_AVAILABLE:
     
     
     class MiRNAAwareEncoder(nn.Module):
+        
         
         def __init__(self, in_channels, hidden_channels, heads,
                      edge_cont_dim, num_mirna, mir_emb_dim=16):
@@ -1695,6 +1795,7 @@ if TORCH_AVAILABLE:
     
     
     def corruption(data, *args, **kwargs):
+        
         node_perm = torch.randperm(data.x.size(0), device=data.x.device)
         edge_perm = torch.randperm(data.edge_attr.size(0), device=data.edge_attr.device)
         neg = Data(
@@ -1712,6 +1813,7 @@ if TORCH_AVAILABLE:
     
     
     def get_graph_loader(payload):
+        
         row_col = payload['row_col']
         num_nodes = int(payload['num_nodes'])
         X_data = payload['node_feat']
@@ -1749,6 +1851,7 @@ if TORCH_AVAILABLE:
     
     
     def train_dgi_model(payload, config: Config, model_path: str):
+        
         print("\n" + "=" * 60)
         print("STEP 4: Training DGI Model")
         print("=" * 60)
@@ -1850,17 +1953,16 @@ if TORCH_AVAILABLE:
         print(f"\n  Training completed in {train_time:.1f}s")
         print(f"  Best loss: {min_loss:.4f}")
         print(f"  Model saved to: {ckpt_path}")
-        
         checkpoint = torch.load(ckpt_path, map_location=device)
         DGI_model.load_state_dict(checkpoint['model_state_dict'])
         DGI_model.eval()
         
         return DGI_model, graph, in_channels, edge_cont_dim, num_mirna
 
-
 if TORCH_AVAILABLE:
     
     def partition_directed_graph_as_undirected(graph: Data, num_parts: int, overlap_hops: int):
+        
         print("  Partitioning graph...")
         graph.orig_idx = torch.arange(graph.num_nodes)
         
@@ -1908,6 +2010,7 @@ if TORCH_AVAILABLE:
     
     
     def run_inference(model, graph, subgraph_list, config: Config, output_path: str):
+        
         print("\n" + "=" * 60)
         print("STEP 5: Running Inference")
         print("=" * 60)
@@ -1932,13 +2035,11 @@ if TORCH_AVAILABLE:
                     continue
                 
                 sub_data = sub_data.to(device)
-                
-                pos_z, _, _ = model(sub_data)
+                pos_z = model.encoder(sub_data)
                 
                 orig_ids = sub_data.orig_idx.to(device)
                 global_embeddings[orig_ids] += pos_z
                 global_counts[orig_ids] += 1
-                
                 (ei1, a1) = model.encoder.attention_scores_mine_l1
                 (ei2, a2) = model.encoder.attention_scores_mine
                 
@@ -1952,7 +2053,7 @@ if TORCH_AVAILABLE:
                 a2_avg = a2_cpu.mean(dim=-1)
                 
                 edge_mir_cpu = sub_data.edge_mir.cpu() if hasattr(sub_data, "edge_mir") else None
-                
+
                 for e_ind in range(ei1_cpu.size(1)):
                     loc_u = ei1_cpu[0, e_ind].item()
                     loc_v = ei1_cpu[1, e_ind].item()
@@ -1965,7 +2066,7 @@ if TORCH_AVAILABLE:
                         mir = -1
                     if mir >= 0:
                         edge_attn_l1[(gu, gv, mir)].append(float(a1_avg[e_ind].item()))
-                
+
                 for e_ind in range(ei2_cpu.size(1)):
                     loc_u = ei2_cpu[0, e_ind].item()
                     loc_v = ei2_cpu[1, e_ind].item()
@@ -1980,22 +2081,22 @@ if TORCH_AVAILABLE:
                         edge_attn_l2[(gu, gv, mir)].append(float(a2_avg[e_ind].item()))
         
         print("  Aggregating results...")
-        
+
         mask = global_counts > 0
         global_embeddings[mask] /= global_counts[mask].unsqueeze(1)
         global_embeddings[~mask] = 0
-        
+
         final_attn_l1 = {k: float(np.mean(v)) for k, v in edge_attn_l1.items()}
         final_attn_l2 = {k: float(np.mean(v)) for k, v in edge_attn_l2.items()}
         
         os.makedirs(output_path, exist_ok=True)
-        
+
         emb = global_embeddings.cpu().numpy()
         embed_path = os.path.join(output_path, "node_embeddings.pkl.gz")
         with gzip.open(embed_path, "wb") as fp:
             pickle.dump(emb, fp)
         print(f"  Embeddings saved to: {embed_path}")
-        
+
         all_edges = []
         all_keys = set(final_attn_l1.keys()).union(set(final_attn_l2.keys()))
         for (u, v, mir) in all_keys:
@@ -2012,6 +2113,7 @@ if TORCH_AVAILABLE:
     
     
     def filter_top_attention_edges(attention_file: str, retain_percent: float, out_file: str):
+        
         print(f"\n  Filtering top {retain_percent*100:.1f}% edges...")
         
         with gzip.open(attention_file, "rb") as fp:
@@ -2021,7 +2123,7 @@ if TORCH_AVAILABLE:
         if total_edges == 0:
             print("    Warning: No edges")
             return []
-        
+
         edge_list.sort(key=lambda e: e[3], reverse=True)
         
         num_keep = max(1, int(total_edges * retain_percent))
@@ -2037,16 +2139,6 @@ if TORCH_AVAILABLE:
         return filtered
 
 
-"""
-Standardized export functions for downstream analysis, visualization, and reproducibility.
-
-These functions convert internal edge representations to well-documented DataFrames
-that separate attention scores from prior weights, making interpretation clearer.
-
-API:
-    - edges_to_mirna_edge_df(): Convert edge list to detailed miRNA-level DataFrame
-    - aggregate_to_cellpair_df(): Aggregate to cell-pair level for network analysis
-"""
 
 
 def edges_to_mirna_edge_df(
@@ -2056,6 +2148,7 @@ def edges_to_mirna_edge_df(
     include_cell_names: bool = True,
     include_cell_types: bool = True,
 ) -> pd.DataFrame:
+    
     if edges is None or len(edges) == 0:
         print("[WARNING] edges_to_mirna_edge_df: Empty edge list provided")
         return pd.DataFrame()
@@ -2064,40 +2157,43 @@ def edges_to_mirna_edge_df(
     row_col = payload.get('row_col', np.array([]))
     edge_feat = payload.get('edge_feat', np.array([]))
     ligidx = payload.get('ligidx', np.array([]))
-    
+
     edge_feat_lookup = {}
     if len(row_col) > 0 and len(edge_feat) > 0:
         for i in range(len(row_col)):
             key = (int(row_col[i, 0]), int(row_col[i, 1]), int(ligidx[i]))
             edge_feat_lookup[key] = edge_feat[i]
-    
+
     cell_names = list(adata.obs_names)
-    
+
     has_cell_type = 'cell_type' in adata.obs.columns
     if has_cell_type:
         cell_types = adata.obs['cell_type'].values
-    
+
+    n_edges_total = len(edges)
+    num_nodes = max(1, int(payload.get("num_nodes", 1)))
+    avg_degree = max(1.0, n_edges_total / num_nodes)
+    attn_scale = avg_degree / 2.0
+
     records = []
     for edge in edges:
         u, v, mir_idx, attn_l1, attn_l2 = edge[0], edge[1], edge[2], edge[3], edge[4]
         u, v, mir_idx = int(u), int(v), int(mir_idx)
-        
+
         if 0 <= mir_idx < len(mirna_list):
             mirna_name = mirna_list[mir_idx]
         else:
             mirna_name = f"unknown_{mir_idx}"
-        
-        attn_avg = 0.5 * (float(attn_l1) + float(attn_l2))
-        
+
         feat_key = (u, v, mir_idx)
         if feat_key in edge_feat_lookup:
             ef = edge_feat_lookup[feat_key]
-            prior_w = float(ef[0])
-            emit_prior = float(ef[1])
-            repress_01 = float(ef[2])
-            risc_01 = float(ef[3])
-            tmod_adj = float(ef[4])
-            mir_proxy_01 = float(ef[5])
+            prior_w = float(ef[0])        
+            emit_prior = float(ef[1])     
+            repress_01 = float(ef[2])     
+            risc_01 = float(ef[3])        
+            tmod_adj = float(ef[4])       
+            mir_proxy_01 = float(ef[5])   
         else:
             prior_w = np.nan
             emit_prior = float(payload.get('release_01', np.zeros(1))[u]) if u < len(payload.get('release_01', [])) else np.nan
@@ -2105,22 +2201,25 @@ def edges_to_mirna_edge_df(
             risc_01 = float(payload.get('risc_01', np.zeros(1))[v]) if v < len(payload.get('risc_01', [])) else np.nan
             tmod_adj = np.nan
             mir_proxy_01 = np.nan
-        
-        _proxy = mir_proxy_01 if (not np.isnan(mir_proxy_01)) else 0.0
-        _repress = repress_01 if (not np.isnan(repress_01)) else 0.0
-        _emit = emit_prior if (not np.isnan(emit_prior)) else 0.0
-        _risc = risc_01 if (not np.isnan(risc_01)) else 0.0
-        
+
+        _proxy = mir_proxy_01 if np.isfinite(mir_proxy_01) else 0.0
+        _repress = repress_01 if np.isfinite(repress_01) else 0.0
+        _emit = emit_prior if np.isfinite(emit_prior) else 0.0
+        _risc = risc_01 if np.isfinite(risc_01) else 0.0
+
         match_score = _proxy * _repress
-        
-        machinery_gate = np.sqrt(_emit * _risc) if (_emit > 0 and _risc > 0) else 0.0
-        
-        n_edges_total = len(edges)
-        avg_degree = max(1, n_edges_total / max(1, payload.get('num_nodes', 1)))
-        _attn_scale = avg_degree / 2.0
-        attn_bonus = _attn_scale * attn_avg
-        
-        score = match_score * machinery_gate * (1.0 + attn_bonus)
+
+        if _emit > 0.0 and _risc > 0.0:
+            machinery_gate = np.sqrt(_emit * _risc)
+        else:
+            machinery_gate = 0.0
+
+        base_score = match_score * machinery_gate
+
+        attn_avg = float(attn_l2)
+
+        attn_bonus = attn_scale * attn_avg
+        score = base_score * (1.0 + attn_bonus)
         
         record = {
             'sender_cell': u,
@@ -2128,7 +2227,11 @@ def edges_to_mirna_edge_df(
             'mirna': mirna_name,
             'mirna_idx': mir_idx,
             'score': score,
+            'base_score': base_score,
             'match_score': match_score,
+            'machinery_gate': machinery_gate,
+            'attn_avg': attn_avg,
+            'attn_bonus': attn_bonus,
             'attn_l1': float(attn_l1),
             'attn_l2': float(attn_l2),
             'prior_w': prior_w,
@@ -2150,17 +2253,19 @@ def edges_to_mirna_edge_df(
         records.append(record)
     
     df = pd.DataFrame(records)
-    
+
     col_order = [
         'sender_cell', 'receiver_cell', 'mirna', 'mirna_idx',
-        'score', 'match_score', 'attn_l1', 'attn_l2', 'prior_w',
-        'emit_prior', 'mir_proxy_01', 'risc_01', 'repress_01', 'tmod_adj'
+        'score', 'base_score', 'match_score', 'machinery_gate',
+        'attn_avg', 'attn_bonus', 'attn_l1', 'attn_l2',
+        'prior_w', 'emit_prior', 'mir_proxy_01',
+        'risc_01', 'repress_01', 'tmod_adj'
     ]
     if include_cell_names:
         col_order.extend(['sender_name', 'receiver_name'])
     if include_cell_types and has_cell_type:
         col_order.extend(['sender_type', 'receiver_type'])
-    
+
     col_order = [c for c in col_order if c in df.columns]
     df = df[col_order]
     
@@ -2175,6 +2280,7 @@ def aggregate_to_cellpair_df(
     topk: int = 5,
     include_mirna_list: bool = True,
 ) -> pd.DataFrame:
+    
     if mirna_edge_df is None or len(mirna_edge_df) == 0:
         print("[WARNING] aggregate_to_cellpair_df: Empty DataFrame provided")
         return pd.DataFrame()
@@ -2191,13 +2297,14 @@ def aggregate_to_cellpair_df(
     has_receiver_type = 'receiver_type' in mirna_edge_df.columns
     
     def agg_func(grp):
+        
         scores = grp['score'].values
         mirnas = grp['mirna'].values
-        
+
         sort_idx = np.argsort(-scores)
         scores_sorted = scores[sort_idx]
         mirnas_sorted = mirnas[sort_idx]
-        
+
         if agg == "sum":
             agg_score = scores.sum()
         elif agg == "max":
@@ -2222,7 +2329,7 @@ def aggregate_to_cellpair_df(
         if include_mirna_list:
             n_show = min(10, len(mirnas_sorted))
             result['mirna_list'] = ",".join(mirnas_sorted[:n_show])
-        
+
         if has_sender_name:
             result['sender_name'] = grp['sender_name'].iloc[0]
         if has_receiver_name:
@@ -2233,10 +2340,10 @@ def aggregate_to_cellpair_df(
             result['receiver_type'] = grp['receiver_type'].iloc[0]
         
         return pd.Series(result)
-    
+
     result_df = mirna_edge_df.groupby(group_cols, as_index=False).apply(agg_func, include_groups=False)
     result_df = result_df.reset_index(drop=True)
-    
+
     col_order = ['sender_cell', 'receiver_cell', 'score', 'n_mirnas', 'top_mirna']
     if include_mirna_list:
         col_order.append('mirna_list')
@@ -2251,7 +2358,7 @@ def aggregate_to_cellpair_df(
     
     col_order = [c for c in col_order if c in result_df.columns]
     result_df = result_df[col_order]
-    
+
     result_df = result_df.sort_values('score', ascending=False).reset_index(drop=True)
     
     print(f"  [aggregate_to_cellpair_df] Aggregated to {len(result_df)} cell pairs (agg={agg})")
@@ -2268,6 +2375,7 @@ def export_communication_results(
     formats: List[str] = ["csv", "parquet"],
     agg_methods: List[str] = ["max", "sum", "topk_sum"],
 ) -> Dict[str, str]:
+    
     os.makedirs(output_dir, exist_ok=True)
     output_paths = {}
     
@@ -2302,7 +2410,7 @@ def export_communication_results(
             
             output_paths[f"mirna_edges_{fmt}"] = fpath
             print(f"    Saved: {fpath}")
-    
+
     print("\n[2] Generating cell-pair level tables...")
     for agg in agg_methods:
         cellpair_df = aggregate_to_cellpair_df(edge_df, agg=agg)
@@ -2329,7 +2437,7 @@ def export_communication_results(
                 
                 output_paths[f"cellpair_{agg}_{fmt}"] = fpath
                 print(f"    Saved: {fpath}")
-    
+
     if 'sender_type' in edge_df.columns and 'receiver_type' in edge_df.columns:
         print("\n[3] Generating cell-type communication matrix...")
         
@@ -2348,6 +2456,7 @@ def export_communication_results(
 
 
 def evaluate_mirna_proxy(predicted_proxy, ground_truth, mirna, n_cells):
+    
     if mirna not in ground_truth.get('mirna_activity', {}):
         return {'error': f'{mirna} not found'}
     
@@ -2368,6 +2477,7 @@ def evaluate_mirna_proxy(predicted_proxy, ground_truth, mirna, n_cells):
 
 
 def evaluate_communication(predicted_df, gt_labels_df, top_k=100):
+    
     merged = predicted_df.merge(
         gt_labels_df[['sender_cell', 'receiver_cell', 'communication']],
         on=['sender_cell', 'receiver_cell']
@@ -2397,6 +2507,7 @@ def evaluate_communication(predicted_df, gt_labels_df, top_k=100):
 
 
 def evaluate_with_ground_truth(adata, payload, ground_truth, gt_labels, mir2tar_csv, config: Config):
+    
     print("\n" + "=" * 60)
     print("EVALUATION: Against Ground Truth")
     print("=" * 60)
@@ -2406,7 +2517,7 @@ def evaluate_with_ground_truth(adata, payload, ground_truth, gt_labels, mir2tar_
         'communication_evaluation': {},
         'pattern_recovery': {}
     }
-    
+
     print("\n[1] Evaluating miRNA Proxy...")
     if "X_miRNA_proxy" in adata.obsm:
         proxy_mat = adata.obsm["X_miRNA_proxy"]
@@ -2450,7 +2561,7 @@ def evaluate_with_ground_truth(adata, payload, ground_truth, gt_labels, mir2tar_
             pred_df = pd.DataFrame({
                 'sender_cell': row_col[:, 0],
                 'receiver_cell': row_col[:, 1],
-                'score': edge_feat[:, 0]
+                'score': edge_feat[:, 0]  
             })
             
             eval_result = evaluate_communication(pred_df, gt_labels)
@@ -2505,8 +2616,8 @@ def evaluate_with_ground_truth(adata, payload, ground_truth, gt_labels, mir2tar_
     
     return results
 
-
 def plot_communication_matrix(comm_matrix, output_path, filename="communication_matrix.png"):
+    
     plt.figure(figsize=(10, 8))
     sns.heatmap(comm_matrix, annot=True, fmt='.2f', cmap='Reds', 
                 square=True, linewidths=0.5)
@@ -2522,8 +2633,9 @@ def plot_communication_matrix(comm_matrix, output_path, filename="communication_
 
 
 def plot_data_overview(adata, output_path, filename="data_overview.png"):
-    print("\n  Generating data overview plots...")
     
+    print("\n  Generating data overview plots...")
+
     adata_vis = adata.copy()
     sc.pp.normalize_total(adata_vis, target_sum=1e4)
     sc.pp.log1p(adata_vis)
@@ -2533,31 +2645,31 @@ def plot_data_overview(adata, output_path, filename="data_overview.png"):
     sc.tl.umap(adata_vis)
     
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    
+
     sc.pl.umap(adata_vis, color='cell_type', ax=axes[0,0], show=False, title='Cell Types')
-    
+
     if 'batch' in adata_vis.obs.columns:
         sc.pl.umap(adata_vis, color='batch', ax=axes[0,1], show=False, title='Batch')
     else:
         axes[0,1].text(0.5, 0.5, 'No batch info', ha='center', va='center')
         axes[0,1].set_title('Batch')
-    
+
     expr = adata.X.toarray().flatten() if sp.issparse(adata.X) else adata.X.flatten()
     axes[0,2].hist(np.log1p(expr[expr > 0]), bins=50, density=True, alpha=0.7)
     axes[0,2].set_xlabel('log(Expr + 1)')
     axes[0,2].set_title('Expression Distribution')
-    
+
     adata.obs['cell_type'].value_counts().plot(kind='bar', ax=axes[1,0], color='steelblue')
     axes[1,0].set_title('Cell Type Distribution')
     plt.setp(axes[1,0].get_xticklabels(), rotation=45, ha='right')
-    
+
     X = adata.X.toarray() if sp.issparse(adata.X) else adata.X
     sparsity = 1 - (X > 0).sum(axis=1) / adata.n_vars
     axes[1,1].hist(sparsity, bins=30, alpha=0.7)
     axes[1,1].axvline(sparsity.mean(), color='red', linestyle='--', label=f'Mean={sparsity.mean():.3f}')
     axes[1,1].set_title('Sparsity per Cell')
     axes[1,1].legend()
-    
+
     genes_per_cell = (X > 0).sum(axis=1)
     axes[1,2].hist(genes_per_cell, bins=30, alpha=0.7, color='green')
     axes[1,2].axvline(genes_per_cell.mean(), color='red', linestyle='--', label=f'Mean={genes_per_cell.mean():.0f}')
@@ -2572,6 +2684,7 @@ def plot_data_overview(adata, output_path, filename="data_overview.png"):
 
 
 def plot_proxy_validation(adata, mirna_db, ground_truth, output_path, filename="proxy_validation.png"):
+    
     print("\n  Generating proxy validation plots...")
     
     comm_pairs = ground_truth.get('communication_pairs', [])
@@ -2585,7 +2698,7 @@ def plot_proxy_validation(adata, mirna_db, ground_truth, output_path, filename="
     
     for idx, ex in enumerate(comm_pairs[:n_plots]):
         ax = axes[idx]
-        
+
         targets = []
         for m in ex['mirnas']:
             targets.extend([t for t in mirna_db.get_targets(m) if t in adata.var_names])
@@ -2593,7 +2706,7 @@ def plot_proxy_validation(adata, mirna_db, ground_truth, output_path, filename="
         
         if not targets:
             ax.text(0.5, 0.5, 'No targets found', ha='center', va='center')
-            ax.set_title(f"{ex['sender']} Ã¢â€ â€™ {ex['receiver']}")
+            ax.set_title(f"{ex['sender']} â†’ {ex['receiver']}")
             continue
         
         sender_mask = adata.obs['cell_type'] == ex['sender']
@@ -2617,7 +2730,7 @@ def plot_proxy_validation(adata, mirna_db, ground_truth, output_path, filename="
         ax.set_xticks(x)
         ax.set_xticklabels(targets, rotation=45, ha='right', fontsize=8)
         ax.set_ylabel('Mean Expression')
-        ax.set_title(f'{ex["sender"]} Ã¢â€ â€™ {ex["receiver"]}\n(Expect: Receiver < Other)')
+        ax.set_title(f'{ex["sender"]} â†’ {ex["receiver"]}\n(Expect: Receiver < Other)')
         ax.legend(fontsize=8)
     
     plt.tight_layout()
@@ -2628,24 +2741,25 @@ def plot_proxy_validation(adata, mirna_db, ground_truth, output_path, filename="
 
 
 def plot_sender_receiver_scores(adata, output_path, filename="sender_receiver_scores.png"):
+    
     print("\n  Generating sender/receiver score plots...")
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    
+
     if 'release_score_01' in adata.obs.columns:
         df = adata.obs[['cell_type', 'release_score_01']].copy()
         ct_order = df.groupby('cell_type')['release_score_01'].median().sort_values(ascending=False).index
         sns.boxplot(data=df, x='cell_type', y='release_score_01', order=ct_order, ax=axes[0,0], palette='Set2')
         axes[0,0].set_title('Release Score (Sender) by Cell Type')
         plt.setp(axes[0,0].get_xticklabels(), rotation=45, ha='right')
-    
+
     if 'risc_score_01' in adata.obs.columns:
         df = adata.obs[['cell_type', 'risc_score_01']].copy()
         ct_order = df.groupby('cell_type')['risc_score_01'].median().sort_values(ascending=False).index
         sns.boxplot(data=df, x='cell_type', y='risc_score_01', order=ct_order, ax=axes[0,1], palette='Set3')
         axes[0,1].set_title('RISC Score (Receiver) by Cell Type')
         plt.setp(axes[0,1].get_xticklabels(), rotation=45, ha='right')
-    
+
     if 'emit_prior_01' in adata.obs.columns and 'risc_score_01' in adata.obs.columns:
         for ct in adata.obs['cell_type'].unique()[:8]:
             mask = adata.obs['cell_type'] == ct
@@ -2658,7 +2772,7 @@ def plot_sender_receiver_scores(adata, output_path, filename="sender_receiver_sc
         axes[1,0].set_ylabel('RISC Score (Receiver)')
         axes[1,0].set_title('Sender vs Receiver Scores')
         axes[1,0].legend(fontsize=8, loc='best')
-    
+
     if 'emit_prior_01' in adata.obs.columns:
         axes[1,1].hist(adata.obs['emit_prior_01'], bins=30, alpha=0.5, label='Emit Prior', color='blue')
     if 'risc_score_01' in adata.obs.columns:
@@ -2676,6 +2790,7 @@ def plot_sender_receiver_scores(adata, output_path, filename="sender_receiver_sc
 
 
 def plot_graph_statistics(payload, output_path, filename="graph_statistics.png"):
+    
     print("\n  Generating graph statistics plots...")
     
     if payload is None or 'row_col' not in payload:
@@ -2689,21 +2804,21 @@ def plot_graph_statistics(payload, output_path, filename="graph_statistics.png")
     mirna_list = payload.get('mirna_list', [])
     
     fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    
+
     if len(edge_feat) > 0:
         w = edge_feat[:, 0]
         axes[0,0].hist(w, bins=50, alpha=0.7, edgecolor='black')
         axes[0,0].set_xlabel('Edge Weight')
         axes[0,0].set_ylabel('Frequency')
         axes[0,0].set_title('Edge Weight Distribution')
-    
+
     if len(ligidx) > 0:
         cnt_mi = np.bincount(ligidx, minlength=len(mirna_list))
         axes[0,1].hist(cnt_mi[cnt_mi > 0], bins=30, alpha=0.7, edgecolor='black')
         axes[0,1].set_xlabel('Number of Edges')
         axes[0,1].set_ylabel('Number of miRNAs')
         axes[0,1].set_title('Edges per miRNA')
-    
+
     if len(row_col) > 0:
         src = row_col[:, 0]
         dst = row_col[:, 1]
@@ -2716,7 +2831,7 @@ def plot_graph_statistics(payload, output_path, filename="graph_statistics.png")
         axes[0,2].set_ylabel('Frequency')
         axes[0,2].set_title('Node Degree Distribution')
         axes[0,2].legend()
-    
+
     if len(ligidx) > 0 and len(mirna_list) > 0:
         cnt_mi = np.bincount(ligidx, minlength=len(mirna_list))
         top_idx = np.argsort(-cnt_mi)[:15]
@@ -2727,14 +2842,14 @@ def plot_graph_statistics(payload, output_path, filename="graph_statistics.png")
         axes[1,0].set_xlabel('Number of Edges')
         axes[1,0].set_title('Top 15 miRNAs by Edge Count')
         axes[1,0].invert_yaxis()
-    
+
     if len(edge_feat) > 0 and edge_feat.shape[1] >= 6:
         feat_names = ['w_base', 'emit_i', 'repress_j', 'risc_j', 'tmod_adj_j', 'proxy_i']
         corr = np.corrcoef(edge_feat.T)
         sns.heatmap(corr, annot=True, fmt='.2f', xticklabels=feat_names, 
                     yticklabels=feat_names, ax=axes[1,1], cmap='coolwarm', center=0)
         axes[1,1].set_title('Edge Feature Correlations')
-    
+
     summary_text = f"""Graph Summary:
     Nodes: {num_nodes}
     Edges: {len(row_col)}
@@ -2759,10 +2874,11 @@ def plot_graph_statistics(payload, output_path, filename="graph_statistics.png")
 
 
 def plot_evaluation_results(eval_results, output_path, filename="evaluation_results.png"):
+    
     print("\n  Generating evaluation results plots...")
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-    
+
     if 'proxy_evaluation' in eval_results and 'details' in eval_results['proxy_evaluation']:
         proxy_df = eval_results['proxy_evaluation']['details']
         
@@ -2777,7 +2893,7 @@ def plot_evaluation_results(eval_results, output_path, filename="evaluation_resu
         axes[0,0].legend()
         axes[0,0].set_xlim([0, 1])
         axes[0,0].set_ylim([0, 1])
-    
+
     if 'communication_evaluation' in eval_results and 'auroc' in eval_results['communication_evaluation']:
         comm_eval = eval_results['communication_evaluation']
         metrics = ['auroc', 'auprc']
@@ -2790,7 +2906,7 @@ def plot_evaluation_results(eval_results, output_path, filename="evaluation_resu
         for bar, val in zip(bars, values):
             axes[0,1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
                           f'{val:.3f}', ha='center', fontsize=10)
-    
+
     if 'pattern_recovery' in eval_results and 'details' in eval_results['pattern_recovery']:
         recovery_df = eval_results['pattern_recovery']['details']
         
@@ -2798,11 +2914,11 @@ def plot_evaluation_results(eval_results, output_path, filename="evaluation_resu
         x = range(len(recovery_df))
         axes[1,0].bar(x, recovery_df['n_edges_found'], color=colors, alpha=0.7)
         axes[1,0].set_xticks(x)
-        labels = [f"{r['sender'][:3]}Ã¢â€ â€™{r['receiver'][:3]}" for _, r in recovery_df.iterrows()]
+        labels = [f"{r['sender'][:3]}â†’{r['receiver'][:3]}" for _, r in recovery_df.iterrows()]
         axes[1,0].set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
         axes[1,0].set_ylabel('Edges Found')
         axes[1,0].set_title(f"Pattern Recovery (Rate: {eval_results['pattern_recovery']['recovery_rate']:.1%})")
-    
+
     summary_lines = ["EVALUATION SUMMARY", "="*40]
     
     if 'proxy_evaluation' in eval_results and 'mean_auroc' in eval_results['proxy_evaluation']:
@@ -2846,6 +2962,7 @@ def plot_evaluation_results(eval_results, output_path, filename="evaluation_resu
 
 
 def plot_ablation_study(ablation_results, output_path, filename="ablation_study.png"):
+    
     print("\n  Generating ablation study plots...")
     
     if not ablation_results:
@@ -2855,7 +2972,7 @@ def plot_ablation_study(ablation_results, output_path, filename="ablation_study.
     df = pd.DataFrame(ablation_results)
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-    
+
     metrics = ['auroc', 'auprc', 'recovery_rate']
     available_metrics = [m for m in metrics if m in df.columns]
     
@@ -2872,7 +2989,7 @@ def plot_ablation_study(ablation_results, output_path, filename="ablation_study.
         axes[0,0].set_title('Performance by Configuration')
         axes[0,0].legend()
         axes[0,0].set_ylim([0, 1])
-    
+
     if 'sparsity' in df.columns and 'auroc' in df.columns:
         axes[0,1].scatter(df['sparsity'], df['auroc'], s=100, alpha=0.7)
         for i, row in df.iterrows():
@@ -2880,7 +2997,7 @@ def plot_ablation_study(ablation_results, output_path, filename="ablation_study.
         axes[0,1].set_xlabel('Sparsity')
         axes[0,1].set_ylabel('AUROC')
         axes[0,1].set_title('Effect of Sparsity on Performance')
-    
+
     if 'noise_level' in df.columns and 'auroc' in df.columns:
         axes[1,0].scatter(df['noise_level'], df['auroc'], s=100, alpha=0.7, color='coral')
         for i, row in df.iterrows():
@@ -2888,7 +3005,7 @@ def plot_ablation_study(ablation_results, output_path, filename="ablation_study.
         axes[1,0].set_xlabel('Noise Level')
         axes[1,0].set_ylabel('AUROC')
         axes[1,0].set_title('Effect of Noise on Performance')
-    
+
     table_cols = ['name'] + [c for c in ['n_cells', 'sparsity', 'noise_level', 'auroc', 'auprc'] if c in df.columns]
     table_data = df[table_cols].round(4).values.tolist()
     table = axes[1,1].table(cellText=table_data, colLabels=table_cols, loc='center', cellLoc='center')
@@ -2906,6 +3023,7 @@ def plot_ablation_study(ablation_results, output_path, filename="ablation_study.
 
 
 def generate_all_figures(adata, mirna_db, payload, ground_truth, gt_labels, eval_results, config: Config):
+    
     print("\n" + "=" * 60)
     print("GENERATING PUBLICATION FIGURES")
     print("=" * 60)
@@ -2918,13 +3036,18 @@ def generate_all_figures(adata, mirna_db, payload, ground_truth, gt_labels, eval
         comm_matrix = comm_patterns.get_communication_matrix()
         plot_communication_matrix(comm_matrix, fig_path)
     
+    
     plot_data_overview(adata, fig_path)
+    
     
     plot_proxy_validation(adata, mirna_db, ground_truth, fig_path)
     
+    
     plot_sender_receiver_scores(adata, fig_path)
     
+    
     plot_graph_statistics(payload, fig_path)
+    
     
     if eval_results:
         plot_evaluation_results(eval_results, fig_path)
@@ -2932,7 +3055,148 @@ def generate_all_figures(adata, mirna_db, payload, ground_truth, gt_labels, eval
     print(f"\n  All figures saved to: {fig_path}")
 
 
+def run_pipeline_on_real_data(
+    adata: ad.AnnData,
+    config: Config,
+    max_mirnas: Optional[int] = 50,
+) -> Dict:
+    
+
+    if not isinstance(adata, ad.AnnData):
+        raise TypeError("adata must be an anndata.AnnData object")
+    if adata.n_obs == 0 or adata.n_vars == 0:
+        raise ValueError("adata must contain at least one cell and one gene")
+    if max_mirnas is not None:
+        max_mirnas = int(max_mirnas)
+        if max_mirnas <= 0:
+            raise ValueError("max_mirnas must be a positive integer or None")
+
+    validate_reference_paths(config)
+
+    if not TORCH_AVAILABLE:
+        raise RuntimeError(
+            "PyTorch/PyG is unavailable; mirCCC graph training and inference cannot run"
+        )
+
+    print("\n" + "=" * 80)
+    print("                    mirCCC: Real-data Analysis Pipeline")
+    print("=" * 80)
+    print(f"\nStarted at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Input data: {adata.n_obs:,} cells x {adata.n_vars:,} genes")
+
+    setup_output_dirs(config)
+    results: Dict = {}
+    adata_work = adata.copy()
+
+    if not adata_work.obs_names.is_unique:
+        adata_work.obs_names_make_unique()
+    if not adata_work.var_names.is_unique:
+        adata_work.var_names_make_unique()
+    if sp.issparse(adata_work.X):
+        adata_work.X = adata_work.X.tocsr()
+
+    config.MAX_MIRNA_CANDIDATES = max_mirnas
+    results["max_mirnas"] = max_mirnas
+
+    geneinfo_path = getattr(config, "GENEINFO_PATH", None)
+    if geneinfo_path and os.path.isfile(geneinfo_path):
+        print("\n" + "=" * 60)
+        print("PHASE 0.5: Unifying Gene Names")
+        print("=" * 60)
+        adata_work, unify_info = unify_anndata_varnames(
+            adata_work,
+            geneinfo_csv=geneinfo_path,
+            species=getattr(config, "SPECIES", "Human"),
+            agg="sum",
+        )
+        results["unify_info"] = unify_info
+    else:
+        print("\n  [SKIP] Gene name unification: geneinfo.csv not found")
+
+    adata_work, proxy_matrix = compute_mirna_proxy(
+        adata_work, config.MIR2TAR_PATH, config
+    )
+    results["proxy_matrix"] = proxy_matrix
+
+    adata_work = compute_sender_receiver_scores(adata_work, config)
+    results["adata"] = adata_work
+
+    payload = build_communication_graph(
+        adata_work, config.MIR2TAR_PATH, config
+    )
+    results["payload"] = payload
+
+    n_edges = int(payload["row_col"].shape[0])
+    if n_edges == 0:
+        raise RuntimeError("No candidate communication edges were generated")
+
+    results_path = os.path.join(config.OUTPUT_DIR, "results")
+    graph_path = os.path.join(results_path, "graph_payload.pkl.gz")
+    with gzip.open(graph_path, "wb") as fp:
+        pickle.dump(payload, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    results["graph_path"] = graph_path
+    print(f"\n  Saved graph to: {graph_path}")
+
+    model_path = os.path.join(config.OUTPUT_DIR, "model")
+    model, graph, in_channels, edge_cont_dim, num_mirna = train_dgi_model(
+        payload, config, model_path
+    )
+    results["model"] = model
+    results["graph"] = graph
+    results["in_channels"] = in_channels
+    results["edge_cont_dim"] = edge_cont_dim
+    results["num_mirna"] = num_mirna
+
+    num_parts = min(max(1, int(config.NUM_PARTS)), max(1, int(graph.num_nodes)))
+    subgraph_list = partition_directed_graph_as_undirected(
+        graph,
+        num_parts=num_parts,
+        overlap_hops=config.OVERLAP_HOPS,
+    )
+
+    embeddings, attention, attn_path = run_inference(
+        model, graph, subgraph_list, config, results_path
+    )
+    results["embeddings"] = embeddings
+    results["attention"] = attention
+    results["attention_path"] = attn_path
+
+    if not attention:
+        raise RuntimeError("Inference completed without any attention edges")
+
+    scored_edges = attention
+    results["scored_edges"] = scored_edges
+
+    export_paths = export_communication_results(
+        edges=scored_edges,
+        adata=adata_work,
+        payload=payload,
+        output_dir=results_path,
+        prefix="mirccc",
+        formats=["csv"],
+        agg_methods=["sum", "max", "topk_sum"],
+    )
+    edge_df = edges_to_mirna_edge_df(scored_edges, adata_work, payload)
+    cellpair_df = aggregate_to_cellpair_df(edge_df, agg="sum")
+
+    results["export_paths"] = export_paths
+    results["mirna_edge_df"] = edge_df
+    results["cellpair_df"] = cellpair_df
+
+    print("\n" + "=" * 80)
+    print("                    REAL-DATA PIPELINE COMPLETE")
+    print("=" * 80)
+    print(f"Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"miRNA edges: {len(edge_df):,}")
+    print(f"Cell pairs: {len(cellpair_df):,}")
+    print(f"Output directory: {config.OUTPUT_DIR}")
+
+    return results
+
+
 def run_full_pipeline(config: Config):
+    
+    validate_reference_paths(config)
     
     print("\n" + "=" * 80)
     print("                    mirCCC: miRNA-mediated Cell Communication")
@@ -2940,10 +3204,11 @@ def run_full_pipeline(config: Config):
     print("=" * 80)
     print(f"\nStarted at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
+    
     setup_output_dirs(config)
     
     results = {}
-    
+
     print("\n" + "=" * 60)
     print("PHASE 0: Data Preparation")
     print("=" * 60)
@@ -2972,7 +3237,7 @@ def run_full_pipeline(config: Config):
             min_targets=config.MIN_TARGETS_PER_MIRNA
         )
         mirna_db.summary()
-        
+
         generator = SyntheticDataGenerator(
             mirna_db=mirna_db,
             n_cells=config.SYNTH_N_CELLS,
@@ -2982,7 +3247,6 @@ def run_full_pipeline(config: Config):
             noise_level=config.SYNTH_NOISE_LEVEL,
             batch_effect_strength=config.SYNTH_BATCH_EFFECT,
             random_seed=config.SYNTH_RANDOM_SEED,
-
             biogenesis_path=config.BIOGENESIS_PATH,
             risc_path=config.RISC_PATH,
             sorting_path=config.SORTING_PATH,
@@ -3005,12 +3269,12 @@ def run_full_pipeline(config: Config):
         gt_labels.to_csv(gt_path, index=False)
         with open(gt_full_path, 'wb') as f:
             pickle.dump(ground_truth, f)
-        
+
         mirna_db.interactions.to_csv(os.path.join(synth_path, "mirna_target_interactions.csv"))
         
         print(f"\n  Saved synthetic data to: {synth_path}")
     
-    print(f"\n  Data loaded: {adata.n_obs} cells Ãƒâ€” {adata.n_vars} genes")
+    print(f"\n  Data loaded: {adata.n_obs} cells Ã— {adata.n_vars} genes")
     print(f"  Ground truth: {len(ground_truth.get('communication_pairs', []))} patterns")
     print(f"  Labels: {len(gt_labels)} cell pairs")
     
@@ -3019,7 +3283,7 @@ def run_full_pipeline(config: Config):
     results['gt_labels'] = gt_labels
     results['mirna_db'] = mirna_db
 
-    if hasattr(config, 'GENEINFO_PATH') and os.path.exists(config.GENEINFO_PATH):
+    if getattr(config, 'GENEINFO_PATH', None) and os.path.isfile(config.GENEINFO_PATH):
         print("\n" + "=" * 60)
         print("PHASE 0.5: Unifying Gene Names")
         print("=" * 60)
@@ -3035,31 +3299,32 @@ def run_full_pipeline(config: Config):
         
     adata, PR = compute_mirna_proxy(adata, config.MIR2TAR_PATH, config)
     results['proxy_matrix'] = PR
-    
+
     adata = compute_sender_receiver_scores(adata, config)
-    
+
     if 'gene_alias_map' in adata.uns:
         del adata.uns['gene_alias_map']
     adata_sr_path = os.path.join(synth_path, "synthetic_with_scores.h5ad")
     adata.write_h5ad(adata_sr_path)
     print(f"\n  Saved adata with scores to: {adata_sr_path}")
-    
+
     payload = build_communication_graph(adata, config.MIR2TAR_PATH, config)
     results['payload'] = payload
+    
     
     graph_path = os.path.join(config.OUTPUT_DIR, "results", "graph_payload.pkl.gz")
     with gzip.open(graph_path, 'wb') as f:
         pickle.dump(payload, f)
     print(f"\n  Saved graph to: {graph_path}")
-    
+
     if TORCH_AVAILABLE and payload['row_col'].shape[0] > 0:
         model_path = os.path.join(config.OUTPUT_DIR, "model")
-        
+
         model, graph, in_channels, edge_cont_dim, num_mirna = train_dgi_model(
             payload, config, model_path
         )
         results['model'] = model
-        
+
         subgraph_list = partition_directed_graph_as_undirected(
             graph, num_parts=config.NUM_PARTS, overlap_hops=config.OVERLAP_HOPS
         )
@@ -3070,30 +3335,27 @@ def run_full_pipeline(config: Config):
         )
         results['embeddings'] = embeddings
         results['attention'] = attention
-        
-        filtered_path = os.path.join(results_path, "filtered_attention.pkl.gz")
-        filtered_edges = filter_top_attention_edges(
-            attn_path, config.RETAIN_PERCENT, filtered_path
-        )
-        results['filtered_edges'] = filtered_edges
-        
+
+        scored_edges = attention
+        results["scored_edges"] = scored_edges
+
         print("\n" + "=" * 60)
         print("PHASE 5.5: Exporting Standardized Results")
         print("=" * 60)
-        
+
         export_paths = export_communication_results(
-            edges=filtered_edges,
+            edges=scored_edges,
             adata=adata,
             payload=payload,
             output_dir=results_path,
             prefix="mirccc",
-            formats=["csv"],
+            formats=["csv"],  
             agg_methods=["sum", "max", "topk_sum"]
         )
         results['export_paths'] = export_paths
-        
-        edge_df = edges_to_mirna_edge_df(filtered_edges, adata, payload)
-        cellpair_df = aggregate_to_cellpair_df(edge_df, agg="max")
+
+        edge_df = edges_to_mirna_edge_df(scored_edges, adata, payload)
+        cellpair_df = aggregate_to_cellpair_df(edge_df, agg="sum")
         results['mirna_edge_df'] = edge_df
         results['cellpair_df'] = cellpair_df
         
@@ -3131,7 +3393,7 @@ def run_full_pipeline(config: Config):
         generate_all_figures(
             adata, mirna_db, payload, ground_truth, gt_labels, eval_results, config
         )
-    
+
     print("\n" + "=" * 80)
     print("                         PIPELINE COMPLETE")
     print("=" * 80)
@@ -3145,7 +3407,7 @@ def run_full_pipeline(config: Config):
         print(f"  - Embeddings & Attention: {results_path}/")
     print(f"  - Evaluation: {eval_path}")
     print(f"  - Figures: {config.OUTPUT_DIR}/figures/")
-    
+
     if 'export_paths' in results:
         print(f"\n  Standardized export files:")
         for name, path in results['export_paths'].items():
@@ -3155,6 +3417,7 @@ def run_full_pipeline(config: Config):
 
 
 def run_ablation_study(config: Config, configs_to_test: List[Dict] = None):
+    
     print("\n" + "=" * 80)
     print("                       ABLATION STUDY")
     print("=" * 80)
@@ -3177,7 +3440,7 @@ def run_ablation_study(config: Config, configs_to_test: List[Dict] = None):
         print(f"Testing configuration: {name}")
         print(f"{'='*60}")
         
-        test_config = Config()
+        test_config = copy(config)
         for k, v in cfg_override.items():
             setattr(test_config, k, v)
         test_config.OUTPUT_DIR = os.path.join(config.OUTPUT_DIR, f"ablation_{name}")
@@ -3185,7 +3448,7 @@ def run_ablation_study(config: Config, configs_to_test: List[Dict] = None):
         
         try:
             results = run_full_pipeline(test_config)
-            
+
             result_row = {
                 'name': name,
                 'n_cells': test_config.SYNTH_N_CELLS,
@@ -3209,14 +3472,14 @@ def run_ablation_study(config: Config, configs_to_test: List[Dict] = None):
         except Exception as e:
             print(f"  Error in {name}: {e}")
             ablation_results.append({'name': name, 'error': str(e)})
-        
+
         cfg_override['name'] = name
-    
+
     ablation_df = pd.DataFrame(ablation_results)
     ablation_path = os.path.join(config.OUTPUT_DIR, "ablation_results.csv")
     ablation_df.to_csv(ablation_path, index=False)
     print(f"\n  Ablation results saved to: {ablation_path}")
-    
+
     fig_path = os.path.join(config.OUTPUT_DIR, "figures")
     os.makedirs(fig_path, exist_ok=True)
     plot_ablation_study(ablation_results, fig_path)
@@ -3224,40 +3487,67 @@ def run_ablation_study(config: Config, configs_to_test: List[Dict] = None):
     return ablation_results
 
 
-if __name__ == "__main__":
-    
-    
-    config = Config()
-    
-    config.OUTPUT_DIR = "./mirccc_synthetic_validation"
-    
+def main(argv=None):
+    parser = ArgumentParser(description="Run the mirCCC synthetic validation pipeline.")
+    parser.add_argument(
+        "--data-dir", default=None,
+        help="Reference CSV directory (default: mirna/ beside this script).",
+    )
+    parser.add_argument(
+        "--output-dir", default="./mirccc_synthetic_validation",
+        help="Output directory (default: ./mirccc_synthetic_validation).",
+    )
+    for filename in ("mir2tar", "biogenesis", "risc", "sorting", "geneinfo"):
+        parser.add_argument(
+            f"--{filename}-path", default=None,
+            help=f"Explicit path to {filename}.csv; overrides --data-dir for this file.",
+        )
+    args = parser.parse_args(argv)
+    config = Config(
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        mir2tar_path=args.mir2tar_path,
+        biogenesis_path=args.biogenesis_path,
+        risc_path=args.risc_path,
+        sorting_path=args.sorting_path,
+        geneinfo_path=args.geneinfo_path,
+    )
+
     config.SYNTH_N_CELLS = 3000
     config.SYNTH_N_GENES = 4000
     config.SYNTH_N_CELL_TYPES = 8
     config.SYNTH_SPARSITY = 0.45
     config.SYNTH_NOISE_LEVEL = 0.15
     config.SYNTH_RANDOM_SEED = 42
+    config.TOP_S_SENDERS = 150      
+    config.TOP_R_RECEIVERS = 150    
+    config.TOP_L_PER_SENDER = 10    
 
-    config.TOP_S_SENDERS = 150
-    config.TOP_R_RECEIVERS = 150
-    config.TOP_L_PER_SENDER = 10
-
-    config.PRIOR_BOOST = 8.0
-    config.REPRESSION_STRENGTH = 0.2
+    config.PRIOR_BOOST = 8.0          
+    config.REPRESSION_STRENGTH = 0.2  
     config.RETAIN_PERCENT = 1.0
-    config.MIRNA_COVERAGE = 1.0
-    config.PROTECT_SIGNAL = True
+    config.MIRNA_COVERAGE = 1.0       
+    config.PROTECT_SIGNAL = True      
     
-    config.NUM_EPOCHS = 500
+    
+    config.NUM_EPOCHS = 500      
     config.HIDDEN_DIM = 128
     config.DEVICE = "cpu"
     
+    
     config.SAVE_FIGURES = True
+    
     
     
     results = run_full_pipeline(config)
     
     
+    
+    
     print("\n" + "=" * 80)
     print("Done!")
     print("=" * 80)
+
+
+if __name__ == "__main__":
+    main()
