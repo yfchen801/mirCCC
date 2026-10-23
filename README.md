@@ -3,7 +3,7 @@
 **Predicting miRNA-mediated cell–cell communication from single-cell transcriptomics via graph-diffused proxies and self-supervised graph transformers**
 
 mirCCC infers extracellular vesicle (EV)-derived miRNA-mediated cell–cell communication from standard scRNA-seq data. It estimates per-cell miRNA activity through signed graph diffusion on a miRNA–target bipartite network, scores sender/receiver capacity using EV biogenesis, sorting, and RISC pathway genes, and constructs per-miRNA directed communication graphs processed by a Graph Transformer trained via Deep Graph Infomax — without requiring any labeled communication data.
-<img width="3108" height="2829" alt="fig1_318_cp" src="https://github.com/user-attachments/assets/90b6cb7e-e9b6-4245-aa12-67db043ccebc" />
+<img width="2706" height="2237" alt="fig1revised" src="https://github.com/user-attachments/assets/50d8848b-581d-4f61-85f3-e7bcb0f4b367" />
 
 ## Installation
 
